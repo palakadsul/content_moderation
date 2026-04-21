@@ -22,21 +22,22 @@ A machine vision project that automatically detects and classifies images and vi
 - Grad-CAM for explainability
 
 ## Setup
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python app.py
-```
+
+    python -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+    python app.py
+
 Open http://localhost:5000 in your browser.
 
 ## Project Structure
-content_moderation/
-├── app.py              # Flask backend and prediction logic
-├── train.ipynb         # Model training notebook
-├── templates/          # HTML frontend
-├── static/             # JavaScript
-└── model/              # Saved model (not included in repo)
+
+    content_moderation/
+    app.py          - Flask backend and prediction logic
+    train.ipynb     - Model training notebook
+    templates/      - HTML frontend
+    static/         - JavaScript
+    model/          - Saved model (not included in repo)
 
 ## Machine Vision Concepts
 - Convolutional Neural Networks
