@@ -4,46 +4,76 @@ import numpy as np
 from flask import Flask, request, jsonify, render_template, send_from_directory
 import tensorflow as tf
 from tensorflow.keras.preprocessing import image as keras_image
+from nudenet import NudeDetector
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 MODEL_PATH = "model/nsfw_model.h5"
-THRESHOLD = 0.35  # NSFW=0, Neutral=1 — above 0.5 means Neutral(Safe)
+THRESHOLD = 0.35
 IMG_SIZE = (224, 224)
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-print("Loading model...")
+print("Loading your trained model...")
 model = tf.keras.models.load_model(MODEL_PATH)
-print("Model loaded ✅")
+print("Your model loaded ✅")
+
+print("Loading NudeNet...")
+nude_detector = NudeDetector()
+print("NudeNet loaded ✅")
+
+NUDE_UNSAFE_LABELS = [
+    "FEMALE_GENITALIA_COVERED", "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED", "FEMALE_BREAST_EXPOSED",
+    "BUTTOCKS_EXPOSED", "ANUS_EXPOSED", "ANUS_COVERED"
+]
 
 def preprocess_image(img_path):
     img = keras_image.load_img(img_path, target_size=IMG_SIZE)
     arr = keras_image.img_to_array(img) / 255.0
     return np.expand_dims(arr, axis=0)
 
-def predict_image(img_path):
+def predict_with_your_model(img_path):
     arr = preprocess_image(img_path)
     prob = float(model.predict(arr, verbose=0)[0][0])
-    # prob close to 1 = Neutral (Safe), prob close to 0 = NSFW (Unsafe)
+    # NSFW=0, Neutral=1
     if prob >= THRESHOLD:
-        label, category = "Safe", "Neutral"
-        confidence = round(prob * 100, 2)
+        return "Safe", "Neutral", round(prob * 100, 2), round(prob, 4)
     else:
-        label, category = "Unsafe", "NSFW"
-        confidence = round((1 - prob) * 100, 2)
-    return label, category, confidence, round(prob, 4)
+        return "Unsafe", "NSFW", round((1 - prob) * 100, 2), round(prob, 4)
+
+def predict_with_nudenet(img_path):
+    try:
+        results = nude_detector.detect(img_path)
+        for item in results:
+            if item["class"] in NUDE_UNSAFE_LABELS and item["score"] > 0.5:
+                return "Unsafe", round(item["score"] * 100, 2)
+        return "Safe", 100.0
+    except:
+        return "Safe", 100.0
+
+def ensemble_predict(img_path):
+    your_label, your_category, your_conf, raw_prob = predict_with_your_model(img_path)
+    nude_label, nude_conf = predict_with_nudenet(img_path)
+
+    # Ensemble logic
+    if your_label == "Unsafe" and nude_label == "Unsafe":
+        return "Unsafe", "NSFW", max(your_conf, nude_conf), raw_prob, "Both models flagged"
+    elif your_label == "Safe" and nude_label == "Safe":
+        return "Safe", "Neutral", your_conf, raw_prob, "Both models approved"
+    elif your_label == "Unsafe" and nude_label == "Safe":
+        return "Safe", "Neutral", 60.0, raw_prob, "NudeNet overrided — Safe"
+    else:
+        return "Unsafe", "NSFW", nude_conf, raw_prob, "NudeNet flagged"
 
 def generate_gradcam(img_path):
     try:
-        # Find last conv layer inside EfficientNetB0
         efficientnet = model.layers[1]
         last_conv = None
         for layer in efficientnet.layers:
             if isinstance(layer, tf.keras.layers.Conv2D):
                 last_conv = layer.name
-
         if last_conv is None:
             return None
 
@@ -51,13 +81,10 @@ def generate_gradcam(img_path):
             inputs=efficientnet.inputs,
             outputs=[efficientnet.get_layer(last_conv).output, efficientnet.output]
         )
-
         img_array = preprocess_image(img_path)
-
         with tf.GradientTape() as tape:
             conv_outputs, predictions = grad_model(img_array)
             loss = predictions[:, 0]
-
         grads = tape.gradient(loss, conv_outputs)
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
         conv_outputs = conv_outputs[0]
@@ -70,7 +97,6 @@ def generate_gradcam(img_path):
         heatmap_resized = cv2.resize(heatmap, (orig.shape[1], orig.shape[0]))
         heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
         overlay = cv2.addWeighted(orig, 0.6, heatmap_colored, 0.4, 0)
-
         gradcam_path = img_path.rsplit(".", 1)[0] + "_gradcam.jpg"
         cv2.imwrite(gradcam_path, overlay)
         return gradcam_path
@@ -90,7 +116,7 @@ def predict_image_route():
     filepath = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(filepath)
 
-    label, category, confidence, raw_prob = predict_image(filepath)
+    label, category, confidence, raw_prob, reason = ensemble_predict(filepath)
     gradcam_path = generate_gradcam(filepath)
     gradcam_url = "/" + gradcam_path.replace("\\", "/") if gradcam_path else None
 
@@ -99,6 +125,7 @@ def predict_image_route():
         "category": category,
         "confidence": confidence,
         "raw_prob": raw_prob,
+        "reason": reason,
         "gradcam_url": gradcam_url
     })
 
@@ -123,12 +150,13 @@ def predict_video_route():
         if frame_count % sample_every == 0:
             frame_path = os.path.join(UPLOAD_FOLDER, f"frame_{frame_count}.jpg")
             cv2.imwrite(frame_path, frame)
-            label, category, confidence, _ = predict_image(frame_path)
+            label, category, confidence, _, reason = ensemble_predict(frame_path)
             results.append({
                 "timestamp": round(frame_count / fps, 2),
                 "label": label,
                 "category": category,
-                "confidence": confidence
+                "confidence": confidence,
+                "reason": reason
             })
             os.remove(frame_path)
         frame_count += 1
